@@ -84,27 +84,19 @@ jobs:
         run: |
           set -euo pipefail
           export DEPLOY_DOMAIN="pr-${{ env.PR_NUMBER }}-sciam-preview.surge.sh"
-
-          # Run surge and capture output
-          TMP_OUT="$(mktemp)"
-          surge ./_site --domain "$DEPLOY_DOMAIN" --token "$SURGE_TOKEN" | tee "$TMP_OUT"
-
-          # Extract the deployed URL
-          LIVE_URL="$(grep -Eo 'https?://[^[:space:]]+\.surge\.sh' "$TMP_OUT" | tail -n1 || true)"
-
-          echo "DEPLOY_DOMAIN=https://$DEPLOY_DOMAIN" >> $GITHUB_ENV
-          if [ -n "${LIVE_URL:-}" ]; then
-            echo "LIVE_DEPLOY_DOMAIN=$LIVE_URL" >> $GITHUB_ENV
-          fi
+          surge ./_site --domain "$DEPLOY_DOMAIN" --token "$SURGE_TOKEN"
+          echo "DEPLOY_URL=https://$DEPLOY_DOMAIN" >> $GITHUB_ENV
 
       - name: Update PR comment with preview link
+        if: success()
         uses: actions/github-script@v7
+        env:
+          COMMENT_ID: ${{ steps.start_comment.outputs.comment_id }}
+          PREVIEW_URL: ${{ env.DEPLOY_URL }}
         with:
           script: |
-            const commentId = ${{ steps.start_comment.outputs.comment_id }};
-            const live = process.env.LIVE_DEPLOY_DOMAIN;
-            const deploy = process.env.DEPLOY_DOMAIN || 'unavailable';
-            const previewUrl = live || deploy;
+            const commentId = Number(process.env.COMMENT_ID);
+            const previewUrl = process.env.PREVIEW_URL || 'unavailable';
             const body = `🚀 **Preview deployed successfully!**\n\n🌐 Preview: [${previewUrl}](${previewUrl})`;
             await github.rest.issues.updateComment({
               comment_id: commentId,
@@ -116,9 +108,11 @@ jobs:
       - name: Update PR comment on failure
         if: failure() && steps.start_comment.outputs.comment_id
         uses: actions/github-script@v7
+        env:
+          COMMENT_ID: ${{ steps.start_comment.outputs.comment_id }}
         with:
           script: |
-            const commentId = ${{ steps.start_comment.outputs.comment_id }};
+            const commentId = Number(process.env.COMMENT_ID);
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             const body = `❌ **Preview build failed.**\n\n🔗 [View workflow run](${runUrl})`;
             await github.rest.issues.updateComment({
