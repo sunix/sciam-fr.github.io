@@ -1,0 +1,129 @@
+name: Preview PR on Surge
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: preview-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    # Run only if it's a /preview comment on a pull request (not an issue)
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/preview')
+
+    steps:
+      - name: Resolve PR number
+        shell: bash
+        run: |
+          echo "PR_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+          echo "Resolved PR_NUMBER=${{ github.event.issue.number }}"
+
+      - name: Comment PR with preview starting
+        id: start_comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const body = `⏳ **Preview build in progress...**\n\n🔗 [View workflow run](${runUrl})`;
+            const { data: comment } = await github.rest.issues.createComment({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+            core.setOutput('comment_id', comment.id);
+
+      # Checkout PR merge ref
+      - name: Checkout PR (merge ref)
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ env.PR_NUMBER }}/merge
+
+      - name: Setup Graphviz
+        uses: ts-graphviz/setup-graphviz@v2
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1.180.1
+        with:
+          ruby-version: '3.1'
+          bundler-cache: true
+          cache-version: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: npm install
+
+      - name: Install Surge
+        run: npm install -g surge
+
+      - name: Build Jekyll site
+        run: |
+          bundle exec jekyll build --baseurl ""
+        env:
+          JEKYLL_ENV: production
+
+      - name: Deploy to Surge
+        env:
+          SURGE_TOKEN: ${{ secrets.SURGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          export DEPLOY_DOMAIN="pr-${{ env.PR_NUMBER }}-sciam-preview.surge.sh"
+
+          # Run surge and capture output
+          TMP_OUT="$(mktemp)"
+          surge ./_site --domain "$DEPLOY_DOMAIN" --token "$SURGE_TOKEN" | tee "$TMP_OUT"
+
+          # Extract the deployed URL
+          LIVE_URL="$(grep -Eo 'https?://[^[:space:]]+\.surge\.sh' "$TMP_OUT" | tail -n1 || true)"
+
+          echo "DEPLOY_DOMAIN=https://$DEPLOY_DOMAIN" >> $GITHUB_ENV
+          if [ -n "${LIVE_URL:-}" ]; then
+            echo "LIVE_DEPLOY_DOMAIN=$LIVE_URL" >> $GITHUB_ENV
+          fi
+
+      - name: Update PR comment with preview link
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commentId = ${{ steps.start_comment.outputs.comment_id }};
+            const live = process.env.LIVE_DEPLOY_DOMAIN;
+            const deploy = process.env.DEPLOY_DOMAIN || 'unavailable';
+            const previewUrl = live || deploy;
+            const body = `🚀 **Preview deployed successfully!**\n\n🌐 Preview: [${previewUrl}](${previewUrl})`;
+            await github.rest.issues.updateComment({
+              comment_id: commentId,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+      - name: Update PR comment on failure
+        if: failure() && steps.start_comment.outputs.comment_id
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commentId = ${{ steps.start_comment.outputs.comment_id }};
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const body = `❌ **Preview build failed.**\n\n🔗 [View workflow run](${runUrl})`;
+            await github.rest.issues.updateComment({
+              comment_id: commentId,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
